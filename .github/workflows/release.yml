@@ -1,0 +1,20 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create zip
+        run: zip -r "pawpayments-billmgr-${GITHUB_REF_NAME}.zip" etc/ paymethods/ cgi/ include/ skins/ install.sh .pawpayments README.md
+
+      - run: gh release create "$GITHUB_REF_NAME" "pawpayments-billmgr-${GITHUB_REF_NAME}.zip" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
