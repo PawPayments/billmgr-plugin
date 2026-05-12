@@ -1,0 +1,38 @@
+#!/usr/bin/php
+<?php
+
+set_include_path(get_include_path() . PATH_SEPARATOR . "/usr/local/mgr5/include/php");
+define('__MODULE__', "pmpawpayments");
+
+require_once 'pawpayments_util.php';
+
+$longopts = [
+    "command:",
+    "payment:",
+    "amount:",
+];
+
+$options = getopt("", $longopts);
+
+try {
+    $command = $options['command'];
+    Debug("command " . $command);
+
+    if ($command === "config") {
+        $config_xml = simplexml_load_string($default_xml_string);
+        $feature_node = $config_xml->addChild("feature");
+
+        $feature_node->addChild("redirect", "on");
+        $feature_node->addChild("notneedprofile", "on");
+
+        $param_node = $config_xml->addChild("param");
+        $param_node->addChild("payment_script", "/mancgi/pawpaymentspayment.php");
+
+        echo $config_xml->asXML();
+    } else {
+        throw new \Exception("Unknown command");
+    }
+} catch (\Exception $e) {
+    Error($e->getMessage());
+    echo $e;
+}

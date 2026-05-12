@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mgrdata>
+  <plugin name="pmpawpayments">
+    <group>payment_method</group>
+    <msg name="desc_short" lang="ru">PawPayments</msg>
+    <msg name="desc_short" lang="en">PawPayments</msg>
+    <msg name="desc_full" lang="ru">Платежный модуль PawPayments — прием криптовалютных платежей</msg>
+    <msg name="desc_full" lang="en">PawPayments payment module — accept cryptocurrency payments</msg>
+    <msg name="price" lang="ru">Бесплатно</msg>
+    <msg name="price" lang="en">Free</msg>
+  </plugin>
+
+  <metadata name="paymethod.edit.pawpayments" type="form">
+    <form>
+      <page name="methodprops">
+        <field name="secret_key">
+          <input name="SECRET_KEY" private="no" required="yes" type="text" />
+        </field>
+        <field name="api_base_url">
+          <input name="API_BASE_URL" private="no" required="no" type="text" />
+        </field>
+        <field name="default_ttl">
+          <input name="DEFAULT_TTL" private="no" required="no" type="text" />
+        </field>
+      </page>
+    </form>
+  </metadata>
+
+  <lang name="en">
+    <messages name="label_paymethod">
+      <msg name="pmpawpayments">PawPayments</msg>
+      <msg name="module_pmpawpayments">PawPayments</msg>
+    </messages>
+
+    <messages name="paymethod.edit.pawpayments">
+      <msg name="secret_key">API Key</msg>
+      <msg name="hint_secret_key">Your PawPayments API key from the merchant dashboard</msg>
+      <msg name="api_base_url">API Base URL</msg>
+      <msg name="hint_api_base_url">Default: https://api.pawpayments.com</msg>
+      <msg name="default_ttl">Invoice TTL (seconds)</msg>
+      <msg name="hint_default_ttl">Default: 3600</msg>
+    </messages>
+  </lang>
+
+  <lang name="ru">
+    <messages name="label_paymethod">
+      <msg name="pmpawpayments">PawPayments</msg>
+      <msg name="module_pmpawpayments">PawPayments</msg>
+    </messages>
+
+    <messages name="paymethod.edit.pawpayments">
+      <msg name="secret_key">API-ключ</msg>
+      <msg name="hint_secret_key">API-ключ из личного кабинета PawPayments</msg>
+      <msg name="api_base_url">Базовый URL API</msg>
+      <msg name="hint_api_base_url">По умолчанию: https://api.pawpayments.com</msg>
+      <msg name="default_ttl">Время жизни инвойса (секунды)</msg>
+      <msg name="hint_default_ttl">По умолчанию: 3600</msg>
+    </messages>
+  </lang>
+</mgrdata>
