@@ -13,6 +13,15 @@ class Webhook
         return hash_equals($expected, $headerSignature);
     }
 
+    public static function verify(
+        string $rawBody,
+        string $headerSignature,
+        array $payload,
+        string $apiKey
+    ): bool {
+        return self::verifyRawBody($rawBody, $headerSignature, $apiKey);
+    }
+
     public static function parsePayload(string $rawBody): array
     {
         $data = json_decode($rawBody, true);

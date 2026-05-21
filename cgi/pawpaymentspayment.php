@@ -5,6 +5,7 @@ set_include_path(get_include_path() . PATH_SEPARATOR . "/usr/local/mgr5/include/
 define('__MODULE__', "pmpawpayments");
 require_once 'pawpayments_util.php';
 require_once __DIR__ . '/../include/php/vendor/pawpayments/sdk/src/Exception/PawPaymentsApiException.php';
+require_once __DIR__ . '/../include/php/vendor/pawpayments/sdk/src/Version.php';
 require_once __DIR__ . '/../include/php/vendor/pawpayments/sdk/src/PawPaymentsClient.php';
 
 echo "Content-Type: text/html; charset=utf-8\n\n";

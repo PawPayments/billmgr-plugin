@@ -30,6 +30,11 @@ class PawPaymentsClient
         return $this->request('GET', '/api/v2/invoices/' . urlencode($orderId));
     }
 
+    public function listAssets(): array
+    {
+        return $this->request('GET', '/api/v2/assets');
+    }
+
     /**
      * Get-or-create a permanent deposit address.
      * Pass either 'family' or 'asset' (or both).
@@ -63,6 +68,7 @@ class PawPaymentsClient
         $headers = [
             'x-api-key: ' . $this->apiKey,
             'Accept: application/json',
+            'User-Agent: ' . Version::USER_AGENT,
         ];
 
         curl_setopt_array($ch, [
