@@ -38,7 +38,10 @@ try {
         'extra' => $elid,
         'amount' => $amount,
         'fiat_currency' => $currency,
-        'billing_type' => 'VARY',
+        // Fixed-price order: STATIC keeps the invoice open after an underpayment so the
+        // customer can top it up; VARY (right for balance top-ups) finalises on the
+        // first payment, making a shortfall terminal.
+        'billing_type' => 'STATIC',
         'ttl' => $ttl,
         'metadata' => [
             'source' => 'billmanager',
