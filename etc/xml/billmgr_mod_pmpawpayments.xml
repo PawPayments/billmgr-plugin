@@ -14,13 +14,16 @@
     <form>
       <page name="methodprops">
         <field name="secret_key">
-          <input name="SECRET_KEY" private="no" required="yes" type="text" />
+          <input name="SECRET_KEY" private="yes" required="yes" type="text" />
         </field>
         <field name="api_base_url">
           <input name="API_BASE_URL" private="no" required="no" type="text" />
         </field>
         <field name="default_ttl">
           <input name="DEFAULT_TTL" private="no" required="no" type="text" />
+        </field>
+        <field name="topup_currency">
+          <input name="TOPUP_CURRENCY" private="no" required="no" type="text" />
         </field>
       </page>
     </form>
@@ -39,6 +42,8 @@
       <msg name="hint_api_base_url">Default: https://api.pawpayments.com</msg>
       <msg name="default_ttl">Invoice TTL (seconds)</msg>
       <msg name="hint_default_ttl">Default: 3600</msg>
+      <msg name="topup_currency">Top-up currency</msg>
+      <msg name="hint_topup_currency">Only for top-up invoices issued by the removed top-up page (plugin 2.0.3 and older): ISO code (e.g. USD) of the currency client balances are kept in; such deposits are credited only in it. Clients now top up via Payments, Add funds.</msg>
     </messages>
   </lang>
 
@@ -55,6 +60,8 @@
       <msg name="hint_api_base_url">По умолчанию: https://api.pawpayments.com</msg>
       <msg name="default_ttl">Время жизни инвойса (секунды)</msg>
       <msg name="hint_default_ttl">По умолчанию: 3600</msg>
+      <msg name="topup_currency">Валюта пополнения</msg>
+      <msg name="hint_topup_currency">Только для инвойсов пополнения, выставленных удалённой страницей пополнения (плагин 2.0.3 и старше): ISO-код (например, USD) валюты балансов клиентов; такие пополнения зачисляются только в ней. Теперь клиенты пополняют баланс через «Платежи → Пополнить».</msg>
     </messages>
   </lang>
 </mgrdata>

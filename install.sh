@@ -8,5 +8,7 @@ cp -r "${BASEDIR}/include" /usr/local/mgr5/
 cp -r "${BASEDIR}/skins" /usr/local/mgr5/
 chmod 755 /usr/local/mgr5/paymethods/pmpawpayments
 chmod 755 /usr/local/mgr5/cgi/pawpayments*.php
+# Removed in 2.0.4: top-ups go through Payments -> Add funds (checkout flow).
+rm -f /usr/local/mgr5/cgi/pawpaymentstopup.php
 killall core 2>/dev/null
 echo "PawPayments BillManager plugin installed"

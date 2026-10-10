@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/pawpayments_rules.php';
+
 date_default_timezone_set("UTC");
 $log_file = fopen("/usr/local/mgr5/var/" . __MODULE__ . ".log", "a");
 $default_xml_string = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<doc/>\n";
@@ -67,6 +69,77 @@ function CgiInput($skip_auth = false) {
     }
 
     return $param;
+}
+
+/**
+ * Settings of every PawPayments payment method (a provider may have one per
+ * currency or project, each with its own key), read from their own paymethod
+ * records. Only the legacy top-up callback needs this; checkout webhooks use
+ * the key of the payment's own method (payment.info).
+ */
+function PawPaymentsMethods() {
+    $methods = [];
+    $paymethods = LocalQuery("paymethod", []);
+    if (!$paymethods) {
+        return $methods;
+    }
+    foreach ($paymethods->xpath('//elem') as $pm) {
+        if ((string) ($pm->module ?? '') !== __MODULE__) {
+            continue;
+        }
+        $detail = LocalQuery("paymethod.edit", ["elid" => (string) $pm->id]);
+        $methods[] = [
+            'id' => (string) $pm->id,
+            'secret_key' => (string) ($detail->SECRET_KEY ?? ''),
+            'topup_currency' => strtoupper(trim((string) ($detail->TOPUP_CURRENCY ?? ''))),
+        ];
+    }
+    return $methods;
+}
+
+const PAWPAYMENTS_HTTP_REASONS = [
+    200 => 'OK', 400 => 'Bad Request', 401 => 'Unauthorized', 404 => 'Not Found',
+    409 => 'Conflict', 503 => 'Service Unavailable',
+];
+
+/** Sends the CGI status header and $text, then stops. */
+function PawPaymentsRespond($code, $text) {
+    echo "Status: {$code} " . (PAWPAYMENTS_HTTP_REASONS[$code] ?? '') . "\n";
+    echo "Content-Type: text/plain; charset=utf-8\n\n";
+    die($text);
+}
+
+/**
+ * Raw body and X-Paw-Signature of a webhook, refusing (400) anything that
+ * cannot be one before any mgrctl call: an unauthenticated request must not
+ * cost BillManager a subprocess.
+ */
+function PawPaymentsWebhookRequest() {
+    $rawBody = (string) ReadRawPostBody();
+    $signature = (string) ($_SERVER['HTTP_X_PAW_SIGNATURE'] ?? '');
+    if (!PawPaymentsLooksLikeWebhook($rawBody, $signature)) {
+        PawPaymentsRespond(400, "Not a PawPayments webhook");
+    }
+    return [$rawBody, $signature];
+}
+
+/** Writes the `logs` of a pawpayments_rules.php decision to the module log. */
+function PawPaymentsLog(array $logs) {
+    foreach ($logs as [$level, $message]) {
+        $level === 'error' ? Error($message) : Debug($message);
+    }
+}
+
+/** Externalids of the payments already booked on BillManager account $accountId. */
+function PawPaymentsCreditedOrderIds($accountId) {
+    $ids = [];
+    $existing = LocalQuery("payment", ["account" => $accountId]);
+    if ($existing) {
+        foreach ($existing->xpath('//elem') as $payment) {
+            $ids[] = (string) ($payment->externalid ?? '');
+        }
+    }
+    return $ids;
 }
 
 function ReadRawPostBody() {
