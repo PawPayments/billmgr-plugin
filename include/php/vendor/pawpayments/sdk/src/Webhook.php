@@ -56,8 +56,15 @@ class Webhook
             return false;
         }
 
+        // In whole cents: as binary floats, 2.02 - 0.01 lands just above 2.01.
         // One cent absorbs rounding of the fiat amounts on either side.
-        return (float) $issued >= (float) $total - 0.01;
+        return self::cents($issued) >= self::cents($total) - 1;
+    }
+
+    /** A fiat amount in whole cents. */
+    private static function cents($amount): int
+    {
+        return (int) round((float) $amount * 100);
     }
 
     public static function parsePayload(string $rawBody): array
