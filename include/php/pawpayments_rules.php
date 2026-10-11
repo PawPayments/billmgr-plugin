@@ -10,14 +10,16 @@
  * module script does.
  *
  * A decision is ['respond' => [code, text], 'logs' => [[level, message], ...]]
- * plus, when money moves, 'setpaid' (payment.setpaid params) or 'add'
- * (payment.add params).
+ * plus, when money moves, 'setpaid' (payment.setpaid params).
  */
 
 require_once __DIR__ . '/vendor/pawpayments/sdk/src/Webhook.php';
 
-// BillManager payment statuses that still await payment: 1 = new, 2 = in progress.
-const PAWPAYMENTS_PAYABLE_STATUSES = ['1', '2'];
+// BillManager payment statuses that still await payment: 1 = new, 2 = payment in
+// progress, 8 = initiated (where BillManager 6 leaves a payment the client has
+// started until the module calls payment.setinpay).
+const PAWPAYMENTS_PAYABLE_STATUSES = ['1', '2', '8'];
+const PAWPAYMENTS_CREDITED_STATUS = '4';
 
 /** A decision that moves no money. */
 function PawPaymentsDecision(int $code, string $text, array $logs = []): array
@@ -73,6 +75,7 @@ function PawPaymentsPaymentFacts($info): ?array
         'module' => (string) ($paymethod->module ?? ''),
         'secret_key' => (string) ($paymethod->SECRET_KEY ?? ''),
         'status' => (string) $payment->status,
+        'externalid' => (string) $payment->externalid,
         'currency' => (string) ($payment->currency[1]->iso ?? ''),
         'amount' => (string) $payment->paymethodamount,
     ];
@@ -113,9 +116,18 @@ function PawPaymentsResultAction(string $elid, string $rawBody, string $signatur
     switch ($status) {
         case 'success':
         case 'paid_over':
-            if (!in_array($payment['status'], PAWPAYMENTS_PAYABLE_STATUSES, true)) {
-                $logs[] = ['debug', "Payment {$elid} has status {$payment['status']} (not new/in progress), skipping"];
+            if ($payment['status'] === PAWPAYMENTS_CREDITED_STATUS && $payment['externalid'] === $orderId) {
+                $logs[] = ['debug', "Payment {$elid} is already credited for order_id={$orderId}, skipping"];
                 return PawPaymentsDecision(200, 'Already processed', $logs);
+            }
+            // Money arrived for a payment that can no longer be paid: credited
+            // through another invoice (the client opened the payment page twice
+            // and paid both), cancelled, refunded... Only a person can sort it out.
+            if (!in_array($payment['status'], PAWPAYMENTS_PAYABLE_STATUSES, true)) {
+                $logs[] = ['error', "Payment {$elid} (status {$payment['status']}, externalid {$payment['externalid']}) no longer awaits payment,"
+                    . " but invoice {$orderId} was paid: " . ($payload['fiat_amount'] ?? '?') . ' ' . ($payload['fiat_currency'] ?? '?')
+                    . '; credit it manually'];
+                return PawPaymentsDecision(200, 'Payment no longer awaits payment', $logs);
             }
             // The invoice was issued for paymethodamount in the payment's
             // currency (pawpaymentspayment.php); a webhook for another amount or
@@ -161,15 +173,18 @@ function PawPaymentsResultAction(string $elid, string $rawBody, string $signatur
 
 /**
  * What the legacy top-up webhook does (invoices issued by the top-up page
- * removed in 2.0.4). The invoice was signed with the key of whichever
- * PawPayments method the page used, so the method whose key verifies it is
- * the one it belongs to.
+ * removed in 2.1.1). It never credits on its own. On BillManager 6 that page
+ * could not issue an invoice at all (whoami carries the ids as attributes, the
+ * page read an element), payment.add with an account and a bare amount creates
+ * no payment there, and a payment list has no externalid to tell a repeated
+ * delivery apart, so an automatic credit could go nowhere or twice. A paid
+ * invoice is verified and logged as an error for the admin to credit by hand.
+ * The invoice was signed with the key of whichever PawPayments method the page
+ * used, so the method whose key verifies it is the one it belongs to.
  *
- * @param array $methods PawPaymentsMethods(): [['id', 'secret_key', 'topup_currency'], ...]
- * @param callable $creditedOrderIds Given an account id, the externalids of the
- *        payments already booked on it; asked only right before crediting
+ * @param array $methods PawPaymentsMethods(): [['id', 'secret_key'], ...]
  */
-function PawPaymentsTopupAction(string $rawBody, string $signature, array $methods, callable $creditedOrderIds): array
+function PawPaymentsTopupAction(string $rawBody, string $signature, array $methods): array
 {
     $unverified = json_decode($rawBody, true);
     if (is_array($unverified) && !empty($unverified['permanent_address_id'])) {
@@ -201,44 +216,10 @@ function PawPaymentsTopupAction(string $rawBody, string $signature, array $metho
         return PawPaymentsDecision(200, 'OK', [['debug', "Topup result: status={$status}, no action"]]);
     }
 
-    $accountId = (string) ($payload['extra'] ?? '');
-    $orderId = (string) ($payload['order_id'] ?? '');
     // Only `fiat_amount` is a fiat value; `amount` is the crypto amount.
-    $fiatAmount = (float) ($payload['fiat_amount'] ?? 0);
-    $fiatCurrency = strtoupper((string) ($payload['fiat_currency'] ?? ''));
-    if (!ctype_digit($accountId) || $orderId === '' || $fiatAmount <= 0) {
-        return PawPaymentsDecision(400, 'Missing data', [['error', "Topup {$orderId}: missing account, order_id or fiat_amount"]]);
-    }
-
-    // payment.add credits a bare number, so only a deposit made in the currency
-    // client balances are kept in may be credited automatically. Without it set
-    // the webhook is refused with 503, so it is retried once the admin sets the
-    // method's Top-up currency; a deposit in another currency is refused for good
-    // (409, visible in the PawPayments webhook log) and must be credited by hand.
-    $topupCurrency = (string) $method['topup_currency'];
-    if ($topupCurrency === '') {
-        return PawPaymentsDecision(503, 'Top-up currency not configured', [['error',
-            "Topup {$orderId} ({$fiatAmount} {$fiatCurrency}, account {$accountId}) waits: set the Top-up currency of PawPayments method {$method['id']}"]]);
-    }
-    if ($fiatCurrency !== $topupCurrency) {
-        return PawPaymentsDecision(409, 'Currency does not match the top-up currency', [['error',
-            "Topup {$orderId} ({$fiatAmount} {$fiatCurrency}, account {$accountId}) not credited: balances are kept in {$topupCurrency}; credit it manually"]]);
-    }
-
-    $logs = [['debug', "Topup result callback: account_id={$accountId} order_id={$orderId} amount={$fiatAmount} {$fiatCurrency}"]];
-    if (in_array($orderId, (array) $creditedOrderIds($accountId), true)) {
-        $logs[] = ['debug', "Topup {$orderId} already processed, skipping"];
-        return PawPaymentsDecision(200, 'Already processed', $logs);
-    }
-
-    return [
-        'respond' => [200, 'OK'],
-        'add' => [
-            'account' => $accountId,
-            'amount' => (string) $fiatAmount,
-            'externalid' => $orderId,
-            'note' => 'Crypto deposit ' . $orderId,
-        ],
-        'logs' => $logs,
-    ];
+    $orderId = (string) ($payload['order_id'] ?? '');
+    $fiat = ($payload['fiat_amount'] ?? '?') . ' ' . strtoupper((string) ($payload['fiat_currency'] ?? ''));
+    $client = (string) ($payload['extra'] ?? '');
+    return PawPaymentsDecision(200, 'OK', [['error', "Legacy top-up invoice {$orderId} was paid: {$fiat} for client {$client}"
+        . " (PawPayments method {$method['id']}); top-ups are not credited automatically any more, credit it manually"]]);
 }

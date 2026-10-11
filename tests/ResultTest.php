@@ -5,7 +5,8 @@ use PHPUnit\Framework\TestCase;
 /**
  * The checkout webhook (pawpaymentsresult.php): which payment it is about,
  * what payment.info facts are read, and when payment.setpaid is called.
- * Payment 123 is new (status 1), 25.00 USD, created with a key of ours.
+ * Payment 123 is new (status 1), 25.00 USD, created with a key of ours, not
+ * yet linked to an invoice.
  */
 class ResultTest extends TestCase
 {
@@ -17,6 +18,7 @@ class ResultTest extends TestCase
             'module' => 'pmpawpayments',
             'secret_key' => self::KEY,
             'status' => '1',
+            'externalid' => '',
             'currency' => 'USD',
             'amount' => '25.00',
         ];
@@ -88,14 +90,14 @@ class ResultTest extends TestCase
     {
         $info = simplexml_load_string(
             '<doc><payment>'
-            . '<id>123</id><status>2</status><paymethodamount>25.00</paymethodamount>'
+            . '<id>123</id><status>2</status><externalid>po1</externalid><paymethodamount>25.00</paymethodamount>'
             . '<currency>3</currency><currency><iso>EUR</iso></currency>'
             . '<paymethod>7</paymethod><paymethod><module>pmpawpayments</module><SECRET_KEY>k7</SECRET_KEY></paymethod>'
             . '</payment></doc>'
         );
 
         $this->assertSame(
-            ['module' => 'pmpawpayments', 'secret_key' => 'k7', 'status' => '2', 'currency' => 'EUR', 'amount' => '25.00'],
+            ['module' => 'pmpawpayments', 'secret_key' => 'k7', 'status' => '2', 'externalid' => 'po1', 'currency' => 'EUR', 'amount' => '25.00'],
             PawPaymentsPaymentFacts($info)
         );
     }
@@ -169,11 +171,22 @@ class ResultTest extends TestCase
         $this->assertSame('po1', $action['setpaid']['info']);
     }
 
-    public function testPaymentInProgressIsStillPayable(): void
+    /**
+     * 2 = payment in progress (after payment.setinpay); 8 = initiated, where
+     * BillManager 6 leaves a payment the client started until then.
+     *
+     * @dataProvider payableStatuses
+     */
+    public function testPaymentAwaitingPaymentIsPayable(string $status): void
     {
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 25.0, 'initial_fiat_amount' => 25.0, 'fiat_currency' => 'USD'], $this->payment(['status' => '2']));
+        $action = $this->act(['status' => 'success', 'fiat_amount' => 25.0, 'initial_fiat_amount' => 25.0, 'fiat_currency' => 'USD'], $this->payment(['status' => $status, 'externalid' => 'po1']));
 
         $this->assertArrayHasKey('setpaid', $action);
+    }
+
+    public function payableStatuses(): array
+    {
+        return [['1'], ['2'], ['8']];
     }
 
     public function testPaidWithinTheMerchantsOwnToleranceMarksItPaid(): void
@@ -185,18 +198,42 @@ class ResultTest extends TestCase
         $this->assertArrayHasKey('setpaid', $action);
     }
 
-    /** @dataProvider settledStatuses */
-    public function testPaymentNoLongerAwaitingPaymentIsNotPaidAgain(string $status): void
+    public function testPaymentCreditedForThisInvoiceIsNotPaidAgain(): void
     {
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 25.0, 'fiat_currency' => 'USD'], $this->payment(['status' => $status]));
+        $action = $this->act(['status' => 'success', 'fiat_amount' => 25.0, 'fiat_currency' => 'USD'], $this->payment(['status' => '4', 'externalid' => 'po1']));
 
         $this->assertSame([200, 'Already processed'], $action['respond']);
         $this->assertArrayNotHasKey('setpaid', $action);
+        $this->assertSame([], array_filter($action['logs'], fn($log) => $log[0] === 'error'));
     }
 
-    public function settledStatuses(): array
+    /**
+     * Credited through another invoice (payment page opened twice, both paid),
+     * promised, awaiting refund, refunded, suspect, cancelled, unknown.
+     *
+     * @dataProvider paymentsNoLongerAwaitingPayment
+     */
+    public function testPaidInvoiceOfAPaymentNoLongerAwaitingPaymentAsksForAManualCredit(array $payment): void
     {
-        return [['4'], ['3'], ['5'], ['']];
+        $action = $this->act(['status' => 'success', 'fiat_amount' => 25.0, 'initial_fiat_amount' => 25.0, 'fiat_currency' => 'USD'], $this->payment($payment));
+
+        $this->assertSame([200, 'Payment no longer awaits payment'], $action['respond']);
+        $this->assertArrayNotHasKey('setpaid', $action);
+        $this->assertTrue($this->hasLog($action, 'error', 'credit it manually'));
+    }
+
+    public function paymentsNoLongerAwaitingPayment(): array
+    {
+        return [
+            'credited via another invoice' => [['status' => '4', 'externalid' => 'po0']],
+            'credited, no externalid' => [['status' => '4']],
+            'promised' => [['status' => '3']],
+            'awaiting refund' => [['status' => '5']],
+            'refunded' => [['status' => '6']],
+            'suspect' => [['status' => '7']],
+            'cancelled' => [['status' => '9']],
+            'no status' => [['status' => '']],
+        ];
     }
 
     /** @dataProvider notCovering */

@@ -4,84 +4,83 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * The legacy top-up webhook (pawpaymentstopup_result.php): which method's key
- * verifies it, and when payment.add credits an account. Two PawPayments
- * methods unless a test says otherwise; method 2 keeps balances in USD.
+ * verifies it, and that a paid invoice is logged for a manual credit, never
+ * credited by the module. Two PawPayments methods unless a test says otherwise.
  */
 class TopupTest extends TestCase
 {
-    /** @var string[] accounts the already-credited lookup was asked about */
-    private $lookups = [];
-
-    protected function setUp(): void
-    {
-        $this->lookups = [];
-    }
-
     private function methods(): array
     {
         return [
-            ['id' => '1', 'secret_key' => 'key_one', 'topup_currency' => 'EUR'],
-            ['id' => '2', 'secret_key' => 'key_two', 'topup_currency' => 'USD'],
+            ['id' => '1', 'secret_key' => 'key_one'],
+            ['id' => '2', 'secret_key' => 'key_two'],
         ];
     }
 
-    private function act(array $payload, string $key = 'key_two', ?array $methods = null, array $credited = []): array
+    private function act(array $payload, string $key = 'key_two', ?array $methods = null): array
     {
         $body = json_encode($payload + ['extra' => '77', 'order_id' => 'po1']);
-        $creditedOrderIds = function (string $accountId) use ($credited): array {
-            $this->lookups[] = $accountId;
-            return $credited;
-        };
 
-        return PawPaymentsTopupAction($body, hash_hmac('sha256', $body, $key), $methods ?? $this->methods(), $creditedOrderIds);
+        return PawPaymentsTopupAction($body, hash_hmac('sha256', $body, $key), $methods ?? $this->methods());
     }
 
-    public function testDepositVerifiedByAMethodIsCreditedInItsTopupCurrency(): void
+    private function errors(array $action): array
     {
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.5, 'fiat_currency' => 'USD']);
+        return array_values(array_map(
+            fn($log) => $log[1],
+            array_filter($action['logs'], fn($log) => $log[0] === 'error')
+        ));
+    }
+
+    /** @dataProvider paidStatuses */
+    public function testPaidInvoiceIsLoggedForAManualCreditAndNotCredited(string $status): void
+    {
+        $action = $this->act(['status' => $status, 'fiat_amount' => 40.5, 'fiat_currency' => 'USD']);
 
         $this->assertSame([200, 'OK'], $action['respond']);
-        $this->assertSame(
-            ['account' => '77', 'amount' => '40.5', 'externalid' => 'po1', 'note' => 'Crypto deposit po1'],
-            $action['add']
-        );
-        $this->assertSame(['77'], $this->lookups);
+        $this->assertSame(['respond', 'logs'], array_keys($action));
+        $errors = $this->errors($action);
+        $this->assertCount(1, $errors);
+        foreach (['po1', '40.5 USD', 'client 77', 'method 2', 'credit it manually'] as $needle) {
+            $this->assertStringContainsString($needle, $errors[0]);
+        }
     }
 
-    public function testTheVerifyingMethodDecidesTheCurrency(): void
+    public function paidStatuses(): array
     {
-        // Signed with method 1's key: its balances are in EUR, so a USD deposit
-        // is refused even though method 2 would have accepted it.
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], 'key_one');
-
-        $this->assertSame(409, $action['respond'][0]);
-        $this->assertArrayNotHasKey('add', $action);
+        return [['success'], ['paid_over']];
     }
 
-    public function testCreditIsTheFiatAmountNeverTheCryptoAmount(): void
+    public function testLogShowsTheFiatAmountNeverTheCryptoAmount(): void
     {
         $action = $this->act(['status' => 'paid_over', 'amount' => 0.0009, 'fiat_amount' => 12.0, 'fiat_currency' => 'usd']);
 
-        $this->assertSame('12', $action['add']['amount']);
+        $this->assertStringContainsString('12 USD', $this->errors($action)[0]);
+        $this->assertStringNotContainsString('0.0009', $this->errors($action)[0]);
     }
 
-    public function testRepeatedDeliveryIsNotCreditedAgain(): void
+    /** @dataProvider unpaidStatuses */
+    public function testUnpaidStatusIsOnlyDebugLogged(string $status): void
     {
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], 'key_two', null, ['po0', 'po1']);
+        $action = $this->act(['status' => $status, 'fiat_amount' => 40.0, 'fiat_currency' => 'USD']);
 
-        $this->assertSame([200, 'Already processed'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
+        $this->assertSame([200, 'OK'], $action['respond']);
+        $this->assertSame([], $this->errors($action));
+    }
+
+    public function unpaidStatuses(): array
+    {
+        return [['partially_paid'], ['cancelled'], ['failed'], ['']];
     }
 
     // ─── keys ───────────────────────────────────────────────────────────────
 
     public function testNoMethodWithAKeyAnswers503(): void
     {
-        $methods = [['id' => '1', 'secret_key' => '', 'topup_currency' => 'USD']];
+        $methods = [['id' => '1', 'secret_key' => '']];
         $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], '', $methods);
 
         $this->assertSame([503, 'Gateway not configured'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
     }
 
     public function testNoMethodsAtAllAnswers503(): void
@@ -95,13 +94,12 @@ class TopupTest extends TestCase
     {
         // An empty key would "verify" a signature anyone can compute.
         $methods = [
-            ['id' => '1', 'secret_key' => '', 'topup_currency' => 'USD'],
-            ['id' => '2', 'secret_key' => 'key_two', 'topup_currency' => 'USD'],
+            ['id' => '1', 'secret_key' => ''],
+            ['id' => '2', 'secret_key' => 'key_two'],
         ];
         $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], '', $methods);
 
         $this->assertSame([401, 'Invalid signature'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
     }
 
     public function testSignatureNoMethodMadeIs401(): void
@@ -109,7 +107,14 @@ class TopupTest extends TestCase
         $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], 'somebody_else');
 
         $this->assertSame([401, 'Invalid signature'], $action['respond']);
-        $this->assertSame([], $this->lookups);
+        $this->assertStringNotContainsString('credit it manually', implode("\n", $this->errors($action)));
+    }
+
+    public function testTheVerifyingMethodIsNamedInTheLog(): void
+    {
+        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], 'key_one');
+
+        $this->assertStringContainsString('method 1', $this->errors($action)[0]);
     }
 
     public function testPermanentAddressDepositIsAcknowledgedWithoutAction(): void
@@ -117,65 +122,6 @@ class TopupTest extends TestCase
         $action = $this->act(['status' => 'success', 'permanent_address_id' => 'pa1'], 'somebody_else');
 
         $this->assertSame([200, 'OK'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
-    }
-
-    // ─── refusals ───────────────────────────────────────────────────────────
-
-    /** @dataProvider unpaidStatuses */
-    public function testUnpaidStatusCreditsNothing(string $status): void
-    {
-        $action = $this->act(['status' => $status, 'fiat_amount' => 40.0, 'fiat_currency' => 'USD']);
-
-        $this->assertSame([200, 'OK'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
-        $this->assertSame([], $this->lookups);
-    }
-
-    public function unpaidStatuses(): array
-    {
-        return [['partially_paid'], ['cancelled'], ['failed'], ['']];
-    }
-
-    /** @dataProvider missingData */
-    public function testMissingAccountOrderOrAmountIs400(array $payload): void
-    {
-        $body = json_encode($payload + ['status' => 'success', 'fiat_currency' => 'USD']);
-        $action = PawPaymentsTopupAction($body, hash_hmac('sha256', $body, 'key_two'), $this->methods(), function () {
-            $this->fail('the already-credited lookup must not run for a malformed webhook');
-        });
-
-        $this->assertSame([400, 'Missing data'], $action['respond']);
-    }
-
-    public function missingData(): array
-    {
-        return [
-            'no account' => [['order_id' => 'po1', 'fiat_amount' => 40.0]],
-            'account not a number' => [['extra' => 'x77', 'order_id' => 'po1', 'fiat_amount' => 40.0]],
-            'no order_id' => [['extra' => '77', 'fiat_amount' => 40.0]],
-            'no fiat_amount (crypto only)' => [['extra' => '77', 'order_id' => 'po1', 'amount' => 0.001]],
-            'zero fiat_amount' => [['extra' => '77', 'order_id' => 'po1', 'fiat_amount' => 0]],
-        ];
-    }
-
-    public function testTopupCurrencyNotSetWaitsWith503(): void
-    {
-        // 503, not a refusal: the gateway retries once the admin sets it.
-        $methods = [['id' => '2', 'secret_key' => 'key_two', 'topup_currency' => '']];
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'USD'], 'key_two', $methods);
-
-        $this->assertSame([503, 'Top-up currency not configured'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
-    }
-
-    public function testDepositInAnotherCurrencyIsRefusedForGood(): void
-    {
-        // payment.add credits a bare number: 40 EUR must never become 40 USD.
-        $action = $this->act(['status' => 'success', 'fiat_amount' => 40.0, 'fiat_currency' => 'EUR']);
-
-        $this->assertSame([409, 'Currency does not match the top-up currency'], $action['respond']);
-        $this->assertArrayNotHasKey('add', $action);
-        $this->assertSame([], $this->lookups);
+        $this->assertSame([], $action['logs']);
     }
 }

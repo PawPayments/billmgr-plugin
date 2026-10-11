@@ -23,7 +23,6 @@ $payment = $info->payment[0];
 $elid = (string) $payment->id;
 $amount = (float) $payment->paymethodamount;
 $currency = (string) ($payment->currency[1]->iso ?? 'USD');
-$accountId = (string) ($payment->account ?? '');
 
 $secretKey = (string) $payment->paymethod[1]->SECRET_KEY;
 $baseUrl = (string) ($payment->paymethod[1]->API_BASE_URL ?? '') ?: 'https://api.pawpayments.com';
@@ -46,7 +45,6 @@ try {
         'metadata' => [
             'source' => 'billmanager',
             'flow' => 'checkout',
-            'account_id' => $accountId,
         ],
         'notify_url' => $resultUrl,
     ]);
@@ -60,6 +58,14 @@ if (!$paymentUrl) {
     Error("No payment_url in response");
     die("No payment URL returned");
 }
+
+// BillManager 6 keeps a payment the client has started as "initiated" (8). Like
+// BillManager's own modules, mark it as being paid and link it to the invoice.
+LocalQuery("payment.setinpay", [
+    "elid" => $elid,
+    "externalid" => (string) ($data['order_id'] ?? ''),
+    "info" => $paymentUrl,
+]);
 
 Debug("Redirecting payment {$elid} to {$paymentUrl}");
 

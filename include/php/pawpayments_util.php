@@ -91,7 +91,6 @@ function PawPaymentsMethods() {
         $methods[] = [
             'id' => (string) $pm->id,
             'secret_key' => (string) ($detail->SECRET_KEY ?? ''),
-            'topup_currency' => strtoupper(trim((string) ($detail->TOPUP_CURRENCY ?? ''))),
         ];
     }
     return $methods;
@@ -102,9 +101,14 @@ const PAWPAYMENTS_HTTP_REASONS = [
     409 => 'Conflict', 503 => 'Service Unavailable',
 ];
 
-/** Sends the CGI status header and $text, then stops. */
+/**
+ * Sends the HTTP status and $text, then stops. ihttpd, which runs mancgi
+ * scripts, ignores a CGI `Status:` header (the reply stays 200) but honours a
+ * status line, so the gateway sees the real code: no retry after a 4xx, a retry
+ * after a 503.
+ */
 function PawPaymentsRespond($code, $text) {
-    echo "Status: {$code} " . (PAWPAYMENTS_HTTP_REASONS[$code] ?? '') . "\n";
+    echo "HTTP/1.1 {$code} " . (PAWPAYMENTS_HTTP_REASONS[$code] ?? '') . "\r\n";
     echo "Content-Type: text/plain; charset=utf-8\n\n";
     die($text);
 }
@@ -128,18 +132,6 @@ function PawPaymentsLog(array $logs) {
     foreach ($logs as [$level, $message]) {
         $level === 'error' ? Error($message) : Debug($message);
     }
-}
-
-/** Externalids of the payments already booked on BillManager account $accountId. */
-function PawPaymentsCreditedOrderIds($accountId) {
-    $ids = [];
-    $existing = LocalQuery("payment", ["account" => $accountId]);
-    if ($existing) {
-        foreach ($existing->xpath('//elem') as $payment) {
-            $ids[] = (string) ($payment->externalid ?? '');
-        }
-    }
-    return $ids;
 }
 
 function ReadRawPostBody() {

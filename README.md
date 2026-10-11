@@ -15,7 +15,9 @@ the on-chain payment confirms.
   Add funds* and picks the PawPayments method. It is a regular payment
   (checkout), so BillManager keeps the account currency and converts it.
   The separate top-up page of 2.0.3 and older is removed (the installer
-  deletes it); its webhook receiver stays only for invoices it already issued.
+  deletes it); its webhook receiver stays only for invoices it already issued,
+  and logs a paid one as an error for you to credit by hand (see
+  [Troubleshooting](#6-troubleshooting)).
 - **Signature verification** — `X-Paw-Signature` (HMAC-SHA256 of the raw body)
   is checked against the API key of the payment's own PawPayments method (each
   method may have its own key), before the payload is trusted; invalid requests
@@ -23,8 +25,14 @@ the on-chain payment confirms.
 - **Amount check** — a `success` webhook marks the payment paid only when it
   is in the payment's currency and covers its amount (within the invoice's
   underpay tolerance); otherwise HTTP 409 and an error in the log.
-- **Idempotent** — checkout checks payment status before calling
-  `payment.setpaid`; the legacy top-up receiver checks `externalid`.
+- **Payment status** — when the client is redirected, the payment is moved to
+  *Payment in progress* (`payment.setinpay`) and linked to the PawPayments
+  invoice (`externalid`); BillManager 6 otherwise leaves it *Initiated*.
+- **Idempotent** — a repeated webhook for an already credited payment is
+  acknowledged without action. Money paid for a payment that no longer awaits
+  it (credited through another invoice because the client opened the payment
+  page twice, cancelled, refunded) is never booked on its own: it is logged as
+  an error to credit by hand.
 - Webhooks with `permanent_address_id` are acknowledged (200 OK) with no action.
 - Currency / network selection happens on the PawPayments paywall — the
   plugin does not need to know about supported assets.
@@ -36,7 +44,7 @@ the on-chain payment confirms.
 | Component   | Minimum version |
 | ----------- | --------------- |
 | BillManager | 6.x (tested on 5.437+) |
-| PHP         | 7.4 (BillManager bundles PHP 7.4 by default; PHP 8.x also works) |
+| PHP         | 7.4+ CLI at `/usr/bin/php` with the `curl` and `xml` (SimpleXML) extensions. BillManager 6 does not ship PHP: on Debian/Ubuntu `apt install php-cli php-curl php-xml`, on AlmaLinux `dnf install php-cli php-xml` (curl is built in) |
 | Shell access | `root` on the BillManager host (the install script writes into `/usr/local/mgr5/`) |
 | HTTPS       | Required — PawPayments only delivers webhooks over TLS |
 
@@ -126,7 +134,6 @@ shows up as **PawPayments** under **Settings → Payment methods**.
    | **API Key**          | Your PawPayments API key from the merchant dashboard.            |
    | **API Base URL**     | Leave empty or set to `https://api.pawpayments.com`.              |
    | **Invoice TTL (s)**  | Lifetime of generated invoices. Default `3600`.                  |
-   | **Top-up currency**  | Only for top-up invoices issued by the removed top-up page (2.0.3 and older): ISO code (e.g. `USD`) of the currency client balances are kept in. |
 
 5. Activate the method.
 
@@ -140,7 +147,7 @@ environment.
 ```bash
 mysql billmgr <<'SQL'
 SET @next_id := (SELECT COALESCE(MAX(id), 0) + 1 FROM paymethod);
-SET @xmlp := '<doc><SECRET_KEY>YOUR_API_KEY</SECRET_KEY><API_BASE_URL>https://api.pawpayments.com</API_BASE_URL><DEFAULT_TTL>3600</DEFAULT_TTL><TOPUP_CURRENCY>USD</TOPUP_CURRENCY></doc>';
+SET @xmlp := '<doc><SECRET_KEY>YOUR_API_KEY</SECRET_KEY><API_BASE_URL>https://api.pawpayments.com</API_BASE_URL><DEFAULT_TTL>3600</DEFAULT_TTL></doc>';
 INSERT INTO paymethod (id, orderpriority, name, active, currency, module, xmlparams, recurring, allowrefund, profiletype)
 VALUES (@next_id, 10, 'PawPayments Crypto', 'on',
         (SELECT id FROM currency WHERE iso = 'USD' LIMIT 1),
@@ -201,7 +208,8 @@ is queried). The signed check below exercises the key.
    profile (BillManager will not let you create payments without these).
 2. Log in as the customer and choose **Top up balance**.
 3. Pick **PawPayments Crypto** and enter an amount.
-4. You are redirected to a `https://paw.now/invoice#…` paywall.
+4. You are redirected to the `https://pawpayments.com/checkout/…` paywall; the
+   BillManager payment is now *Payment in progress*.
 5. Pay a small amount with any supported cryptocurrency.
 6. After the on-chain confirmation, the webhook calls `payment.setpaid` and
    the BillManager payment is marked as **Paid**, with `externalid` set to the
@@ -213,8 +221,9 @@ is queried). The signed check below exercises the key.
 KEY="<your_api_key>"
 ORDER_ID="<paw_order_id>"
 ELID="<billmgr_payment_id>"
-# fiat_amount / fiat_currency must match the payment's amount and currency
-BODY="{\"order_id\":\"$ORDER_ID\",\"extra\":\"$ELID\",\"status\":\"success\",\"fiat_amount\":\"25\",\"fiat_currency\":\"USD\",\"asset\":\"USDT\"}"
+# initial_fiat_amount (what the invoice was issued for) and fiat_currency must
+# match the payment's amount and currency
+BODY="{\"order_id\":\"$ORDER_ID\",\"extra\":\"$ELID\",\"status\":\"success\",\"fiat_amount\":25,\"initial_fiat_amount\":25,\"fiat_currency\":\"USD\",\"asset\":\"usdt_tron\"}"
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$KEY" | awk '{print $2}')
 curl -X POST "https://<your-server>/mancgi/pawpaymentsresult.php" \
      -H "Content-Type: application/json" \
@@ -235,16 +244,17 @@ payment's PawPayments method has no API key).
 | `mgrctl paymethod.add ... ERROR missed(currency)` | The `mgrctl` wizard for payment methods is stateful — pass parameters in the right step or use the UI / direct DB seed in section 3 (Option B). |
 | Webhook returns `Payment not found` | The BillManager payment row referenced by `extra` does not exist, or it has no project/profile (`payment.info` then errors with `missed(project)`). Ensure projects, profiles and accounts are properly configured. |
 | Webhook returns HTTP 503 `Gateway not configured` | The **API Key** of the PawPayments payment method is empty. Fill it in. |
-| Legacy top-up webhook returns 503 `Top-up currency not configured` | A top-up invoice issued by the removed page was paid. Set **Top-up currency** on the payment method to the ISO code your client balances use; the webhook is retried. A deposit in another currency gets 409 and an error in the log: credit it by hand. |
+| Log: `Legacy top-up invoice … was paid …; credit it manually` | A top-up invoice issued by the top-up page of 2.0.3 or older was paid. The module no longer credits these itself: add the amount to the client's balance by hand (the line names the invoice, the fiat amount and currency, and the id the old page stored). |
+| Log: `Payment … no longer awaits payment, but invoice … was paid; credit it manually` | Money arrived for a payment that is already credited (through another invoice: the client opened the payment page twice and paid both), cancelled or refunded. Nothing was booked; credit the amount by hand or refund it. |
+| Log: `invoice … expired after a partial payment …; credit it manually` | The client paid part of the invoice and it expired. You keep the partial; a BillManager payment can only be paid in full, so credit it by hand. |
 | Webhook returns 409 `Amount or currency does not match the payment` | The paid invoice is in another currency or for less than the BillManager payment. The payment is not marked paid; check the log line and credit by hand if appropriate. |
 | Webhook returns `Invalid signature` | The API key configured for the payment method does not match the key used to issue the invoice. Update **Settings → Payment methods → PawPayments → API Key** and re-issue. |
-| Legacy top-up not crediting funds | The receiver creates a BillManager **payment** with status *paid*, which BillManager itself converts into account credit on the next billing cycle event. Inspect logs with `tail -f /usr/local/mgr5/var/billmgr.log`. |
 | Nginx returns `502 Bad Gateway` for `/mancgi/...` | `ihttpd` is not listening on the address Nginx is proxying to. Confirm `ss -tlnp \| grep 1500` and update `proxy_pass` accordingly (often the public IP, not `127.0.0.1`). |
 
-Plugin debug messages are written to BillManager's main log:
+The module writes its own log:
 
 ```bash
-tail -f /usr/local/mgr5/var/billmgr.log | grep -i pawpayments
+tail -f /usr/local/mgr5/var/pmpawpayments.log
 ```
 
 ---
@@ -256,7 +266,7 @@ rm -f /usr/local/mgr5/etc/xml/billmgr_mod_pmpawpayments.xml
 rm -f /usr/local/mgr5/paymethods/pmpawpayments
 rm -f /usr/local/mgr5/cgi/pawpayments*.php
 rm -rf /usr/local/mgr5/include/php/vendor/pawpayments
-rm -f  /usr/local/mgr5/include/php/pawpayments_util.php
+rm -f  /usr/local/mgr5/include/php/pawpayments_util.php /usr/local/mgr5/include/php/pawpayments_rules.php
 rm -rf /usr/local/mgr5/skins/orion/images/pawpayments  # if present
 
 mysql billmgr -e "DELETE FROM paymethod WHERE module='pmpawpayments';"
@@ -276,9 +286,9 @@ keeps `payment` rows even after the method is gone).
 `pawpayments_util.php` (which opens the module log and shells out to `mgrctl`
 the moment it is loaded). It covers which payment a checkout webhook is about
 and which method's key verifies it, when `payment.setpaid` is called
-(payable status, currency and amount check), and when the legacy top-up
-webhook calls `payment.add` (verifying method, top-up currency, fiat amount
-only, repeated deliveries).
+(payable status, currency and amount check, repeated deliveries, money for a
+payment that no longer awaits it), and how the legacy top-up webhook is
+verified and logged for a manual credit.
 
 ```bash
 cd tests
